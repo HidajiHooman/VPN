@@ -1,46 +1,7 @@
-// mhrv-rs exit node — deploy as an HTTP endpoint on any serverless
-// TypeScript host with a public IP that isn't a Google datacenter
-// (Deno Deploy, fly.io, your own VPS, etc.). Uses only web-standard
-// `Request` / `Response` / `fetch` so it's portable across runtimes.
-//
-// Purpose: chain client → Apps Script → this exit node → destination.
-// Apps Script's UrlFetchApp can't reach Cloudflare-protected sites that
-// flag Google datacenter IPs as bots (chatgpt.com, claude.ai, grok.com,
-// many other CF-fronted SaaS). This exit node sits between Apps Script
-// and the destination; the destination sees the exit node's outbound IP
-// (generally not flagged as Google datacenter) and accepts the request.
-//
-// Setup:
-//   1. Pick a host that runs web-standard fetch handlers (e.g. Deno
-//      Deploy, fly.io with a thin server wrapper, or any cheap VPS
-//      running Deno / Node + this script as a handler).
-//   2. Paste the contents of this file as the request handler.
-//   3. Set PSK below to a strong secret (`openssl rand -hex 32` from
-//      a terminal — DO NOT leave the placeholder in production).
-//   4. Deploy and copy the public URL of the deployed handler.
-//   5. In mhrv-rs config.json, add:
-//        "exit_node": {
-//          "enabled": true,
-//          "relay_url": "https://your-deployed-exit-node.example.com",
-//          "psk": "<the same PSK you set above>",
-//          "mode": "selective",
-//          "hosts": ["chatgpt.com", "claude.ai", "x.com", "grok.com"]
-//        }
-//
-// Threat model: PSK is the only thing keeping this from being an open
-// proxy on the public internet. Treat it like a password: do not commit
-// to source control, do not share publicly, rotate if leaked. The exit
-// node refuses all requests that don't carry the matching PSK.
-//
-// Failure mode: if the exit node is unreachable, mhrv-rs falls back to
-// the regular Apps Script relay automatically — the only consequence
-// of an offline exit node is that ChatGPT/Claude/Grok stop working;
-// other sites are unaffected.
+// mhrv-rs exit node for Deno Deploy
 
 const PSK = "Hi33267407";
 
-// Headers the client may send that must NOT be forwarded to the
-// destination — they're hop-by-hop or would break re-encoding.
 const STRIP_HEADERS = new Set([
   "host",
   "connection",
@@ -81,16 +42,10 @@ function sanitizeHeaders(h: unknown): Record<string, string> {
   return out;
 }
 
-export default async function (req: Request): Promise<Response> {
-  // Fail closed on the placeholder PSK so a fresh deploy without setup
-  // can't accidentally serve as an open relay.
+Deno.serve(async (req: Request): Promise<Response> => {
   if (PSK === "CHANGE_ME_TO_A_STRONG_SECRET") {
     return Response.json(
-      {
-        e:
-          "exit_node misconfigured: PSK is still the placeholder. Set " +
-          "a strong secret in the source before deploying.",
-      },
+      { e: "exit_node misconfigured: PSK is still the placeholder" },
       { status: 503 },
     );
   }
@@ -118,20 +73,14 @@ export default async function (req: Request): Promise<Response> {
       return Response.json({ e: "bad url" }, { status: 400 });
     }
 
-    // Loop guard: if u points at this exit node's own host, refuse.
-    // Without this, a misconfigured client could chain exit-node →
-    // exit-node → exit-node → ... and burn the host's runtime budget.
     try {
       const reqUrl = new URL(req.url);
       const dstUrl = new URL(u);
-      if (
-        reqUrl.host === dstUrl.host &&
-        reqUrl.protocol === dstUrl.protocol
-      ) {
+      if (reqUrl.host === dstUrl.host && reqUrl.protocol === dstUrl.protocol) {
         return Response.json({ e: "exit-node loop refused" }, { status: 400 });
       }
     } catch {
-      // Malformed URL — let the fetch below 400.
+      // Malformed URL
     }
 
     let payload: Uint8Array | undefined;
@@ -161,4 +110,4 @@ export default async function (req: Request): Promise<Response> {
     const message = err instanceof Error ? err.message : String(err);
     return Response.json({ e: message }, { status: 500 });
   }
-}
+});
